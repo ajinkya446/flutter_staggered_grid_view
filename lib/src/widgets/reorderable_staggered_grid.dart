@@ -54,6 +54,8 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
   double _initialHeight = 0.0;
   bool _scalingActive = false;
   final List<GlobalKey> _childKeys = []; 
+  int? _hoverIndex;
+  int? _draggingIndex;
 
   @override
   Widget build(BuildContext context) {
@@ -110,9 +112,9 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
           ),
         ),
         childWhenDragging: Opacity(opacity: 0.25, child: tileContent),
-        onDragStarted: () {},
-        onDraggableCanceled: (_, __) {},
-        onDragEnd: (_) { setState(() { _hoverIndex = null; }); },
+        onDragStarted: () { setState(() { _draggingIndex = i; }); },
+        onDraggableCanceled: (_, __) { setState(() { _draggingIndex = null; _hoverIndex = null; }); },
+        onDragEnd: (_) { setState(() { _draggingIndex = null; _hoverIndex = null; }); },
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
           decoration: _hoverIndex == i
@@ -187,7 +189,7 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
 
         // Derive a reasonable cell height from existing tiles: use tiles that
         // declare mainAxisCellCount or infer from their measured height.
-        double? cellHeight;
+        double cellHeight;
         final measuredHeights = <double>[];
         for (var i = 0; i < _childKeys.length; i++) {
           final key = _childKeys[i];
@@ -223,11 +225,11 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
           if (w is StaggeredGridTile) {
             if (w.mainAxisCellCount != null) return w.mainAxisCellCount!.toInt();
             if (w.mainAxisExtent != null) {
-              return (w.mainAxisExtent! / cellHeight).round().clamp(1, 9999);
+              return ((w.mainAxisExtent! / cellHeight).round().clamp(1, 9999)).toInt();
             }
           }
           if (render != null) {
-            return (render.size.height / cellHeight).round().clamp(1, 9999);
+            return ((render.size.height / cellHeight).round().clamp(1, 9999)).toInt();
           }
           return 1;
         }
@@ -346,7 +348,7 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
                 child: DragTarget<int>(
                   onMove: (details) {
                     setState(() {
-                      _hoverIndex = _indexForGlobalOffset(details.offset);
+                      _hoverIndex = _indexForGlobalOffset(details.offset, _draggingIndex ?? -1);
                     });
                   },
                   onLeave: (data) {
@@ -356,7 +358,7 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
                   },
                   onWillAccept: (data) => true,
                   onAcceptWithDetails: (details) {
-                    final newIndex = _indexForGlobalOffset(details.offset);
+                    final newIndex = _indexForGlobalOffset(details.offset, details.data);
                     setState(() {
                       _hoverIndex = null;
                     });
