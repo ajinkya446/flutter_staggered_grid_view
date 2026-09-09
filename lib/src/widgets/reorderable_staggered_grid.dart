@@ -53,9 +53,19 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
   double _initialWidth = 0.0;
   double _initialHeight = 0.0;
   bool _scalingActive = false;
+  final List<GlobalKey> _childKeys = []; 
 
   @override
   Widget build(BuildContext context) {
+    // Ensure we have a GlobalKey for each child to calculate positions for
+    // empty-space drops.
+    while (_childKeys.length < widget.children.length) {
+      _childKeys.add(GlobalKey());
+    }
+    if (_childKeys.length > widget.children.length) {
+      _childKeys.removeRange(widget.children.length, _childKeys.length);
+    }
+
     final children = List<Widget>.generate(widget.children.length, (i) {
       final original = widget.children[i];
       final inner = original is StaggeredGridTile ? original.child : original;
@@ -126,44 +136,91 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
         ),
       );
 
+      Widget tileWidget;
       if (original is StaggeredGridTile) {
         if (original.mainAxisExtent != null) {
-          return StaggeredGridTile.extent(
+          tileWidget = StaggeredGridTile.extent(
             crossAxisCellCount: original.crossAxisCellCount,
             mainAxisExtent: original.mainAxisExtent!,
             child: draggable,
           );
-        }
-        if (original.mainAxisCellCount != null) {
-          return StaggeredGridTile.count(
+        } else if (original.mainAxisCellCount != null) {
+          tileWidget = StaggeredGridTile.count(
             crossAxisCellCount: original.crossAxisCellCount,
             mainAxisCellCount: original.mainAxisCellCount!,
             child: draggable,
           );
+        } else {
+          tileWidget = StaggeredGridTile.fit(
+            crossAxisCellCount: original.crossAxisCellCount,
+            child: draggable,
+          );
         }
-        return StaggeredGridTile.fit(
-          crossAxisCellCount: original.crossAxisCellCount,
+      } else {
+        tileWidget = StaggeredGridTile.fit(
+          crossAxisCellCount: 1,
           child: draggable,
         );
       }
 
-      return StaggeredGridTile.fit(
-        crossAxisCellCount: 1,
-        child: draggable,
-      );
+      // Wrap each tile with a KeyedSubtree attached to a GlobalKey so we can
+      // map global drop coordinates back to tile positions when dropping into
+      // empty space.
+      return KeyedSubtree(key: _childKeys[i], child: tileWidget);
     });
 
     // Wrap the grid in a LayoutBuilder so we can read its constraints and
     // support pinch-to-resize from the bottom-right corner. The Animated-
     // Container holds the current width (if set by a pinch) so the grid's
-    // children automatically reflow to the new available width.
+    // children automatically reflow to the new available width. Additionally
+    // add a full-area DragTarget to accept drops into empty spaces.
     return LayoutBuilder(builder: (context, constraints) {
-      Widget grid = StaggeredGrid.count(
+      final grid = StaggeredGrid.count(
         crossAxisCount: widget.crossAxisCount,
         mainAxisSpacing: widget.mainAxisSpacing,
         crossAxisSpacing: widget.crossAxisSpacing,
         children: children,
       );
+
+      // Helper to map a global drop offset into an index. If the offset lies
+      // inside a child, return that child's index. Otherwise return the
+      // nearest child's index or append at end.
+      int _indexForGlobalOffset(Offset global) {
+        final gridBox = context.findRenderObject() as RenderBox?;
+        if (gridBox == null) return widget.children.length;
+        final local = gridBox.globalToLocal(global);
+
+        for (var i = 0; i < _childKeys.length; i++) {
+          final key = _childKeys[i];
+          final cctx = key.currentContext;
+          if (cctx == null) continue;
+          final render = cctx.findRenderObject() as RenderBox?;
+          if (render == null) continue;
+          final childGlobal = render.localToGlobal(Offset.zero);
+          final childLocal = gridBox.globalToLocal(childGlobal);
+          final rect = childLocal & render.size;
+          if (rect.contains(local)) return i;
+        }
+
+        double bestDist = double.infinity;
+        int bestIndex = widget.children.length;
+        for (var i = 0; i < _childKeys.length; i++) {
+          final key = _childKeys[i];
+          final cctx = key.currentContext;
+          if (cctx == null) continue;
+          final render = cctx.findRenderObject() as RenderBox?;
+          if (render == null) continue;
+          final childGlobal = render.localToGlobal(Offset.zero);
+          final childLocal = gridBox.globalToLocal(childGlobal);
+          final center = childLocal + Offset(render.size.width / 2, render.size.height / 2);
+          final d = (center - local).distance;
+          if (d < bestDist) {
+            bestDist = d;
+            bestIndex = i;
+          }
+        }
+        return bestIndex;
+      }
 
       return GestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -196,7 +253,46 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
           width: _width ?? constraints.maxWidth,
           duration: const Duration(milliseconds: 120),
           curve: Curves.easeOut,
-          child: grid,
+          child: Stack(
+            children: [
+              grid,
+              // Full-size DragTarget to accept drops into empty areas. It
+              // delegates to per-tile DragTargets if the drop lands on a tile
+              // by refusing (returning false) in that case.
+              Positioned.fill(
+                child: DragTarget<int>(
+                  onWillAcceptWithDetails: (details) {
+                    if (details == null) return false;
+                    final gridBox = context.findRenderObject() as RenderBox?;
+                    if (gridBox == null) return false;
+                    final idx = _indexForGlobalOffset(details.offset);
+                    // If the point is inside an existing child, let that
+                    // child's DragTarget handle it (so return false).
+                    if (idx < _childKeys.length) {
+                      final key = _childKeys[idx];
+                      final cctx = key.currentContext;
+                      if (cctx != null) {
+                        final render = cctx.findRenderObject() as RenderBox?;
+                        if (render != null) {
+                          final childGlobal = render.localToGlobal(Offset.zero);
+                          final childLocal = gridBox.globalToLocal(childGlobal);
+                          final rect = childLocal & render.size;
+                          final local = gridBox.globalToLocal(details.offset);
+                          if (rect.contains(local)) return false;
+                        }
+                      }
+                    }
+                    return true;
+                  },
+                  onAcceptWithDetails: (details) {
+                    final newIndex = _indexForGlobalOffset(details.offset);
+                    widget.onReorder(details.data, newIndex);
+                  },
+                  builder: (context, candidate, rejected) => const SizedBox.expand(),
+                ),
+              ),
+            ],
+          ),
         ),
       );
     });
