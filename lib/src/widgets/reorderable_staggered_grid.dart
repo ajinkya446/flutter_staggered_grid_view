@@ -48,6 +48,12 @@ class ReorderableStaggeredGrid extends StatefulWidget {
 }
 
 class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
+  double? _width;
+  double? _height;
+  double _initialWidth = 0.0;
+  double _initialHeight = 0.0;
+  bool _scalingActive = false;
+
   @override
   Widget build(BuildContext context) {
     final children = List<Widget>.generate(widget.children.length, (i) {
@@ -147,12 +153,53 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
       );
     });
 
-    return StaggeredGrid.count(
-      crossAxisCount: widget.crossAxisCount,
-      mainAxisSpacing: widget.mainAxisSpacing,
-      crossAxisSpacing: widget.crossAxisSpacing,
-      children: children,
-    );
+    // Wrap the grid in a LayoutBuilder so we can read its constraints and
+    // support pinch-to-resize from the bottom-right corner. The Animated-
+    // Container holds the current width (if set by a pinch) so the grid's
+    // children automatically reflow to the new available width.
+    return LayoutBuilder(builder: (context, constraints) {
+      Widget grid = StaggeredGrid.count(
+        crossAxisCount: widget.crossAxisCount,
+        mainAxisSpacing: widget.mainAxisSpacing,
+        crossAxisSpacing: widget.crossAxisSpacing,
+        children: children,
+      );
+
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onScaleStart: (details) {
+          final box = context.findRenderObject() as RenderBox?;
+          if (box == null) return;
+          _initialWidth = box.size.width;
+          _initialHeight = box.size.height;
+          final local = box.globalToLocal(details.focalPoint);
+          // Only start scaling when the gesture begins near the bottom-right
+          // corner (within 48 pixels). This prevents accidental scale when
+          // interacting with tiles.
+          if (local.dx >= _initialWidth - 48 && local.dy >= _initialHeight - 48) {
+            _scalingActive = true;
+          } else {
+            _scalingActive = false;
+          }
+        },
+        onScaleUpdate: (details) {
+          if (!_scalingActive) return;
+          final newW = (_initialWidth * details.scale).clamp(80.0, constraints.maxWidth.isFinite ? constraints.maxWidth : _initialWidth * 3);
+          setState(() {
+            _width = newW;
+          });
+        },
+        onScaleEnd: (_) {
+          _scalingActive = false;
+        },
+        child: AnimatedContainer(
+          width: _width ?? constraints.maxWidth,
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+          child: grid,
+        ),
+      );
+    });
   }
 
   static StaggeredGridTile? _extractTile(Widget w) {
@@ -178,54 +225,10 @@ class _ControlWrapper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final resizeHandle = onResizeDelta == null
-        ? null
-        : GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onPanUpdate: (details) => onResizeDelta!(details.delta),
-            child: Container(
-              width: 28,
-              height: 28,
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Icon(
-                Icons.open_in_full,
-                color: Colors.white,
-                size: 16,
-              ),
-            ),
-          );
-
-    return Stack(
-      children: [
-        // Place the content as a non-positioned child so the Stack can size
-        // itself based on the child's intrinsic dimensions. Using
-        // Positioned.fill here caused unbounded constraints when the widget
-        // was used inside an Overlay (drag feedback), producing a RenderBox
-        // with missing size.
-        child,
-        Positioned(
-          top: 6,
-          right: 6,
-          child: Container(
-            width: 28,
-            height: 28,
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(Icons.drag_handle, color: Colors.white, size: 16),
-          ),
-        ),
-        if (resizeHandle != null)
-          Positioned(
-            bottom: 6,
-            right: 6,
-            child: resizeHandle,
-          ),
-      ],
-    );
+    // Simplify controls: show only the child contents so the grid appears
+    // without overlay buttons. Drag-to-reorder still works via LongPress-
+    // Draggable on the tile's content. Pinch-to-resize for the entire grid is
+    // handled at the grid level.
+    return child;
   }
 }
