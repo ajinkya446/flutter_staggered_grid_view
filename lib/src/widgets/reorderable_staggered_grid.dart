@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_staggered_grid_view/src/widgets/staggered_grid.dart';
 import 'package:flutter_staggered_grid_view/src/widgets/staggered_grid_tile.dart';
 
-/// A simple helper that provides programmatic reorder/resize controls for
-/// staggered grid children. This is intentionally lightweight: it exposes
-/// onReorder and onResize callbacks so the parent can update the underlying
-/// data and rebuild the grid.
-class ReorderableStaggeredGrid extends StatelessWidget {
+/// A helper that provides drag-and-drop reordering and optional resize callbacks
+/// for staggered grid children. Dragging is implemented with LongPressDraggable
+/// and DragTarget; the StaggeredGridTile remains the ParentDataWidget so layout
+/// behavior is preserved.
+class ReorderableStaggeredGrid extends StatefulWidget {
   const ReorderableStaggeredGrid({
     Key? key,
     required this.children,
@@ -26,71 +26,132 @@ class ReorderableStaggeredGrid extends StatelessWidget {
   final double crossAxisSpacing;
 
   @override
-  Widget build(BuildContext context) {
-    // Wrap each child with simple controls for move up / move down and resize.
-    // If the provided child is a StaggeredGridTile, recreate it and wrap its
-    // inner child so the ParentDataWidget remains the direct child of the
-    // StaggeredGrid (this preserves layout behavior).
-    final wrapped = List<Widget>.generate(children.length, (i) {
-      final original = children[i];
+  _ReorderableStaggeredGridState createState() => _ReorderableStaggeredGridState();
+}
 
-      // Build control overlay to be placed inside the tile's child.
-      Widget buildWithOverlay(Widget inner) {
-        return _ControlWrapper(
+class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
+  int? _draggingIndex;
+
+  @override
+  Widget build(BuildContext context) {
+    final children = List<Widget>.generate(widget.children.length, (i) {
+      final original = widget.children[i];
+
+      Widget buildDraggableInner(Widget inner) {
+        return LongPressDraggable<int>(
+          data: i,
+          dragAnchorStrategy: pointerDragAnchorStrategy,
+          feedback: Material(
+            elevation: 6,
+            color: Colors.transparent,
+            child: Opacity(
+              opacity: 0.95,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width / widget.crossAxisCount * (original is StaggeredGridTile ? original.crossAxisCellCount.toDouble() : 1)),
+                child: inner,
+              ),
+            ),
+          ),
+          childWhenDragging: Opacity(opacity: 0.0, child: inner),
+          onDragStarted: () => setState(() => _draggingIndex = i),
+          onDraggableCanceled: (_, __) => setState(() => _draggingIndex = null),
+          onDragEnd: (_) => setState(() => _draggingIndex = null),
+          child: inner,
+        );
+      }
+
+      Widget tileWithDragTarget(Widget tileWidget) {
+        return DragTarget<int>(
+          onWillAccept: (from) => from != null && from != i,
+          onAccept: (from) {
+            // Reorder so that dragged item is inserted at the position of this tile
+            widget.onReorder(from, i);
+            setState(() => _draggingIndex = null);
+          },
+          builder: (context, candidateData, rejectedData) {
+            final hasCandidate = candidateData.isNotEmpty;
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              decoration: hasCandidate
+                  ? BoxDecoration(border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3))
+                  : null,
+              child: tileWidget,
+            );
+          },
+        );
+      }
+
+      // If original is a StaggeredGridTile, recreate it and make its inner child draggable.
+      if (original is StaggeredGridTile) {
+        final inner = original.child;
+
+        Widget draggableInner = buildDraggableInner(_ControlWrapper(
           index: i,
           child: inner,
-          onMoveUp: i > 0 ? () => onReorder(i, i - 1) : null,
-          onMoveDown: i < children.length - 1 ? () => onReorder(i, i + 1) : null,
-          onIncreaseWidth: onResize == null
+          onIncreaseWidth: widget.onResize == null
               ? null
               : () {
                   final tile = _extractTile(original);
                   final newCross = (tile?.crossAxisCellCount ?? 1) + 1;
-                  onResize!(i, newCross, tile?.mainAxisCellCount);
+                  widget.onResize!(i, newCross, tile?.mainAxisCellCount);
                 },
-          onDecreaseWidth: onResize == null
+          onDecreaseWidth: widget.onResize == null
               ? null
               : () {
                   final tile = _extractTile(original);
                   final newCross = (tile?.crossAxisCellCount ?? 1) - 1;
-                  onResize!(i, newCross < 1 ? 1 : newCross, tile?.mainAxisCellCount);
+                  widget.onResize!(i, newCross < 1 ? 1 : newCross, tile?.mainAxisCellCount);
                 },
-        );
+        ));
+
+        final recreated = (original.mainAxisExtent != null)
+            ? StaggeredGridTile.extent(
+                crossAxisCellCount: original.crossAxisCellCount,
+                mainAxisExtent: original.mainAxisExtent!,
+                child: draggableInner,
+              )
+            : (original.mainAxisCellCount != null)
+                ? StaggeredGridTile.count(
+                    crossAxisCellCount: original.crossAxisCellCount,
+                    mainAxisCellCount: original.mainAxisCellCount!,
+                    child: draggableInner,
+                  )
+                : StaggeredGridTile.fit(
+                    crossAxisCellCount: original.crossAxisCellCount,
+                    child: draggableInner,
+                  );
+
+        return tileWithDragTarget(recreated);
       }
 
-      if (original is StaggeredGridTile) {
-        // Recreate the tile with the inner child wrapped by the controls.
-        final inner = original.child;
-        if (original.mainAxisExtent != null) {
-          return StaggeredGridTile.extent(
-            crossAxisCellCount: original.crossAxisCellCount,
-            mainAxisExtent: original.mainAxisExtent!,
-            child: buildWithOverlay(inner),
-          );
-        } else if (original.mainAxisCellCount != null) {
-          return StaggeredGridTile.count(
-            crossAxisCellCount: original.crossAxisCellCount,
-            mainAxisCellCount: original.mainAxisCellCount!,
-            child: buildWithOverlay(inner),
-          );
-        } else {
-          return StaggeredGridTile.fit(
-            crossAxisCellCount: original.crossAxisCellCount,
-            child: buildWithOverlay(inner),
-          );
-        }
-      }
+      // For non-tile widgets, just wrap them with draggable + drag target.
+      final nonTileChild = buildDraggableInner(_ControlWrapper(
+        index: i,
+        child: original,
+        onIncreaseWidth: widget.onResize == null
+            ? null
+            : () {
+                final tile = _extractTile(original);
+                final newCross = (tile?.crossAxisCellCount ?? 1) + 1;
+                widget.onResize!(i, newCross, tile?.mainAxisCellCount);
+              },
+        onDecreaseWidth: widget.onResize == null
+            ? null
+            : () {
+                final tile = _extractTile(original);
+                final newCross = (tile?.crossAxisCellCount ?? 1) - 1;
+                widget.onResize!(i, newCross < 1 ? 1 : newCross, tile?.mainAxisCellCount);
+              },
+      ));
 
-      // If it's not a StaggeredGridTile, just wrap the widget directly.
-      return buildWithOverlay(original);
+      return tileWithDragTarget(nonTileChild);
     });
 
-    // Use StaggeredGrid.count so callers can still use StaggeredGridTile children.
     return StaggeredGrid.count(
-      crossAxisCount: crossAxisCount,
-      mainAxisSpacing: mainAxisSpacing,
-      crossAxisSpacing: crossAxisSpacing,
-      children: wrapped,
+      crossAxisCount: widget.crossAxisCount,
+      mainAxisSpacing: widget.mainAxisSpacing,
+      crossAxisSpacing: widget.crossAxisSpacing,
+      children: children,
     );
   }
 
@@ -134,10 +195,14 @@ class _ControlWrapper extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (onMoveUp != null)
-                _IconButtonSmall(icon: Icons.arrow_upward, onPressed: onMoveUp!),
-              if (onMoveDown != null)
-                _IconButtonSmall(icon: Icons.arrow_downward, onPressed: onMoveDown!),
+              // Drag handle indicator
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                child: const Icon(Icons.drag_handle, color: Colors.white, size: 16),
+              ),
+              const SizedBox(height: 6),
               if (onIncreaseWidth != null)
                 _IconButtonSmall(icon: Icons.add, onPressed: onIncreaseWidth!),
               if (onDecreaseWidth != null)
