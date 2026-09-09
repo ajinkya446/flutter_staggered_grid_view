@@ -112,27 +112,18 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
         childWhenDragging: Opacity(opacity: 0.25, child: tileContent),
         onDragStarted: () {},
         onDraggableCanceled: (_, __) {},
-        onDragEnd: (_) {},
-        child: DragTarget<int>(
-          onWillAcceptWithDetails: (details) => details.data != i,
-          onAcceptWithDetails: (details) {
-            widget.onReorder(details.data, i);
-          },
-          builder: (context, candidateData, rejectedData) {
-            final hasCandidate = candidateData.isNotEmpty;
-            return AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              decoration: hasCandidate
-                  ? BoxDecoration(
-                      border: Border.all(
-                        color: Theme.of(context).colorScheme.primary,
-                        width: 3,
-                      ),
-                    )
-                  : null,
-              child: tileContent,
-            );
-          },
+        onDragEnd: (_) { setState(() { _hoverIndex = null; }); },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          decoration: _hoverIndex == i
+              ? BoxDecoration(
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.primary,
+                    width: 3,
+                  ),
+                )
+              : null,
+          child: tileContent,
         ),
       );
 
@@ -256,37 +247,32 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
           child: Stack(
             children: [
               grid,
-              // Full-size DragTarget to accept drops into empty areas. It
-              // delegates to per-tile DragTargets if the drop lands on a tile
-              // by refusing (returning false) in that case.
+              // Full-size DragTarget to accept drops into empty areas. We
+              // use onMove to update a hover index for visual feedback and
+              // handle acceptance in onAcceptWithDetails.
               Positioned.fill(
                 child: DragTarget<int>(
-                  onWillAcceptWithDetails: (details) {
-                    if (details == null) return false;
-                    final gridBox = context.findRenderObject() as RenderBox?;
-                    if (gridBox == null) return false;
-                    final idx = _indexForGlobalOffset(details.offset);
-                    // If the point is inside an existing child, let that
-                    // child's DragTarget handle it (so return false).
-                    if (idx < _childKeys.length) {
-                      final key = _childKeys[idx];
-                      final cctx = key.currentContext;
-                      if (cctx != null) {
-                        final render = cctx.findRenderObject() as RenderBox?;
-                        if (render != null) {
-                          final childGlobal = render.localToGlobal(Offset.zero);
-                          final childLocal = gridBox.globalToLocal(childGlobal);
-                          final rect = childLocal & render.size;
-                          final local = gridBox.globalToLocal(details.offset);
-                          if (rect.contains(local)) return false;
-                        }
-                      }
-                    }
-                    return true;
+                  onMove: (details) {
+                    setState(() {
+                      _hoverIndex = _indexForGlobalOffset(details.offset);
+                    });
                   },
+                  onLeave: (data) {
+                    setState(() {
+                      _hoverIndex = null;
+                    });
+                  },
+                  onWillAccept: (data) => true,
                   onAcceptWithDetails: (details) {
                     final newIndex = _indexForGlobalOffset(details.offset);
-                    widget.onReorder(details.data, newIndex);
+                    setState(() {
+                      _hoverIndex = null;
+                    });
+                    // Normalize index when removing earlier item
+                    var oldIndex = details.data;
+                    var adjustedNew = newIndex;
+                    if (oldIndex < adjustedNew) adjustedNew = (adjustedNew - 1).clamp(0, widget.children.length - 1);
+                    widget.onReorder(oldIndex, adjustedNew);
                   },
                   builder: (context, candidate, rejected) => const SizedBox.expand(),
                 ),
@@ -297,6 +283,8 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
       );
     });
   }
+
+  int? _hoverIndex;
 
   static StaggeredGridTile? _extractTile(Widget w) {
     if (w is StaggeredGridTile) return w;
