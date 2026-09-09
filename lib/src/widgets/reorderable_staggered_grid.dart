@@ -173,44 +173,136 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
         children: children,
       );
 
-      // Helper to map a global drop offset into an index. If the offset lies
-      // inside a child, return that child's index. Otherwise return the
-      // nearest child's index or append at end.
-      int _indexForGlobalOffset(Offset global) {
+      // Compute insertion index using a cell-fitting skyline algorithm so
+      // dropping into empty spaces places the dragged tile where it fits and
+      // other tiles reflow around it.
+      int _indexForGlobalOffset(Offset global, int draggedIndex) {
         final gridBox = context.findRenderObject() as RenderBox?;
         if (gridBox == null) return widget.children.length;
+        final gridSize = gridBox.size;
         final local = gridBox.globalToLocal(global);
 
-        for (var i = 0; i < _childKeys.length; i++) {
-          final key = _childKeys[i];
-          final cctx = key.currentContext;
-          if (cctx == null) continue;
-          final render = cctx.findRenderObject() as RenderBox?;
-          if (render == null) continue;
-          final childGlobal = render.localToGlobal(Offset.zero);
-          final childLocal = gridBox.globalToLocal(childGlobal);
-          final rect = childLocal & render.size;
-          if (rect.contains(local)) return i;
-        }
+        final colCount = widget.crossAxisCount;
+        final columnWidth = gridSize.width / colCount;
 
-        double bestDist = double.infinity;
-        int bestIndex = widget.children.length;
+        // Derive a reasonable cell height from existing tiles: use tiles that
+        // declare mainAxisCellCount or infer from their measured height.
+        double? cellHeight;
+        final measuredHeights = <double>[];
         for (var i = 0; i < _childKeys.length; i++) {
           final key = _childKeys[i];
           final cctx = key.currentContext;
           if (cctx == null) continue;
           final render = cctx.findRenderObject() as RenderBox?;
           if (render == null) continue;
-          final childGlobal = render.localToGlobal(Offset.zero);
-          final childLocal = gridBox.globalToLocal(childGlobal);
-          final center = childLocal + Offset(render.size.width / 2, render.size.height / 2);
-          final d = (center - local).distance;
-          if (d < bestDist) {
-            bestDist = d;
-            bestIndex = i;
+          final widgetTile = widget.children[i] is StaggeredGridTile ? widget.children[i] as StaggeredGridTile : null;
+          if (widgetTile != null && widgetTile.mainAxisCellCount != null) {
+            measuredHeights.add(render.size.height / widgetTile.mainAxisCellCount!.toDouble());
+          } else if (widgetTile != null && widgetTile.mainAxisExtent != null) {
+            measuredHeights.add(widgetTile.mainAxisExtent!.toDouble());
+          } else {
+            // fallback: treat square cells
+            measuredHeights.add(render.size.height);
           }
         }
-        return bestIndex;
+        if (measuredHeights.isNotEmpty) {
+          cellHeight = measuredHeights.reduce((a, b) => a + b) / measuredHeights.length;
+        } else {
+          cellHeight = columnWidth; // fallback
+        }
+
+        // Helper to get spans for a given child index
+        int _crossSpanAt(int idx) {
+          final w = widget.children[idx];
+          if (w is StaggeredGridTile) return w.crossAxisCellCount;
+          return 1;
+        }
+
+        int _mainSpanAt(int idx, RenderBox? render) {
+          final w = widget.children[idx];
+          if (w is StaggeredGridTile) {
+            if (w.mainAxisCellCount != null) return w.mainAxisCellCount!.toInt();
+            if (w.mainAxisExtent != null) {
+              return (w.mainAxisExtent! / cellHeight).round().clamp(1, 9999);
+            }
+          }
+          if (render != null) {
+            return (render.size.height / cellHeight).round().clamp(1, 9999);
+          }
+          return 1;
+        }
+
+        // Build a list of items excluding the dragged one in original order.
+        final order = <int>[];
+        for (var i = 0; i < widget.children.length; i++) if (i != draggedIndex) order.add(i);
+
+        // Prepare heights skyline per column (in main-axis cell units)
+        final heights = List<int>.filled(colCount, 0);
+
+        final placed = <int, Map<String, int>>{}; // index -> {'x','y'} positions in cell units
+
+        for (var idx in order) {
+          final key = _childKeys[idx];
+          final cctx = key.currentContext;
+          final render = cctx?.findRenderObject() as RenderBox?;
+          final cross = _crossSpanAt(idx).clamp(1, colCount);
+          final main = _mainSpanAt(idx, render);
+
+          // Find best x where tile can fit (minimize max height)
+          int bestX = 0;
+          int bestY = 1 << 30;
+          for (var x = 0; x <= colCount - cross; x++) {
+            var maxh = 0;
+            for (var c = x; c < x + cross; c++) if (heights[c] > maxh) maxh = heights[c];
+            if (maxh < bestY) {
+              bestY = maxh;
+              bestX = x;
+            }
+          }
+          // Place
+          for (var c = bestX; c < bestX + cross; c++) heights[c] = bestY + main;
+          placed[idx] = {'x': bestX, 'y': bestY};
+        }
+
+        // Determine target column/row under the drop point
+        final targetCol = (local.dx / columnWidth).clamp(0, colCount - 1).floor();
+        final targetRow = (local.dy / cellHeight).floor();
+
+        // Now find where the dragged tile could fit if placed near target.
+        final draggedCross = _crossSpanAt(draggedIndex).clamp(1, colCount);
+
+        // Search for a placement position starting near targetCol and scanning
+        // rows from 0..max to find a spot where columns c..c+draggedCross-1
+        // have heights <= targetRow.
+        int chosenInsertOrderIndex = order.length; // default append
+        bool found = false;
+        final maxRow = (heights.reduce((a, b) => a > b ? a : b) + 20);
+        for (var row = 0; row <= maxRow && !found; row++) {
+          // try columns in order of proximity to targetCol
+          final cols = List<int>.generate(colCount - draggedCross + 1, (i) => i);
+          cols.sort((a, b) => (a - targetCol).abs().compareTo((b - targetCol).abs()));
+          for (var col in cols) {
+            var canFit = true;
+            for (var c = col; c < col + draggedCross; c++) if (heights[c] > row) { canFit = false; break; }
+            if (canFit) {
+              // Determine insertion index: count how many placed items start before
+              // this (row,col) position in layout order
+              int countBefore = 0;
+              for (var idx in order) {
+                final pos = placed[idx]!;
+                if (pos['y']! < row) countBefore++;
+                else if (pos['y']! == row && pos['x']! < col) countBefore++;
+              }
+              chosenInsertOrderIndex = countBefore;
+              found = true;
+              break;
+            }
+          }
+        }
+
+        // Map chosenInsertOrderIndex back to original children index
+        if (chosenInsertOrderIndex >= order.length) return widget.children.length;
+        return order[chosenInsertOrderIndex];
       }
 
       return GestureDetector(
