@@ -378,8 +378,6 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
     });
   }
 
-  int? _hoverIndex;
-
   static StaggeredGridTile? _extractTile(Widget w) {
     if (w is StaggeredGridTile) return w;
     if (w is ParentDataWidget<StaggeredGridParentData>) {
