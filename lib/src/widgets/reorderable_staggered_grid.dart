@@ -178,7 +178,7 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
       // Compute insertion index using a cell-fitting skyline algorithm so
       // dropping into empty spaces places the dragged tile where it fits and
       // other tiles reflow around it.
-      int _indexForGlobalOffset(Offset global, int draggedIndex) {
+      int _indexForGlobalOffset(Offset global, int? draggedIndex) {
         final gridBox = context.findRenderObject() as RenderBox?;
         if (gridBox == null) return widget.children.length;
         final gridSize = gridBox.size;
@@ -271,7 +271,8 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
         final targetRow = (local.dy / cellHeight).floor();
 
         // Now find where the dragged tile could fit if placed near target.
-        final draggedCross = _crossSpanAt(draggedIndex).clamp(1, colCount);
+        final effectiveDraggedIndex = (draggedIndex != null && draggedIndex >= 0 && draggedIndex < widget.children.length) ? draggedIndex : null;
+        final draggedCross = (effectiveDraggedIndex != null) ? _crossSpanAt(effectiveDraggedIndex).clamp(1, colCount) : 1;
 
         // Search for a placement position starting near targetCol and scanning
         // rows from 0..max to find a spot where columns c..c+draggedCross-1
@@ -348,7 +349,7 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
                 child: DragTarget<int>(
                   onMove: (details) {
                     setState(() {
-                      _hoverIndex = _indexForGlobalOffset(details.offset, _draggingIndex ?? -1);
+                      _hoverIndex = _indexForGlobalOffset(details.offset, _draggingIndex);
                     });
                   },
                   onLeave: (data) {
@@ -358,7 +359,7 @@ class _ReorderableStaggeredGridState extends State<ReorderableStaggeredGrid> {
                   },
                   onWillAccept: (data) => true,
                   onAcceptWithDetails: (details) {
-                    final newIndex = _indexForGlobalOffset(details.offset, details.data);
+                    final newIndex = _indexForGlobalOffset(details.offset, details.data as int?);
                     setState(() {
                       _hoverIndex = null;
                     });
